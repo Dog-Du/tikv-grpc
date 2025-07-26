@@ -32,6 +32,7 @@
 
 #include <grpc/compression.h>
 #include <grpc/grpc.h>
+#include <grpc/impl/channel_arg_names.h>
 #include <grpc/impl/compression_types.h>
 #include <grpc/support/log.h>
 
@@ -93,10 +94,7 @@ CompressionFilter::CompressionFilter(const ChannelArgs& args)
           args.GetBool(GRPC_ARG_ENABLE_PER_MESSAGE_COMPRESSION).value_or(true)),
       enable_decompression_(
           args.GetBool(GRPC_ARG_ENABLE_PER_MESSAGE_DECOMPRESSION)
-              .value_or(true)),
-      min_message_size_to_compress_(
-        args.GetInt(GRPC_ARG_MIN_MESSAGE_SIZE_TO_COMPRESS).value_or(0)),
-      compression_options_(grpc_core::MakeCompressionOptions(args)) {
+              .value_or(true)) {
   // Make sure the default is enabled.
   if (!enabled_compression_algorithms_.IsSet(default_compression_algorithm_)) {
     const char* name;
@@ -128,15 +126,14 @@ MessageHandle CompressionFilter::CompressMessage(
   // crime/beast like vulns).
   uint32_t& flags = message->mutable_flags();
   if (algorithm == GRPC_COMPRESS_NONE || !enable_compression_ ||
-      (flags & (GRPC_WRITE_NO_COMPRESS | GRPC_WRITE_INTERNAL_COMPRESS)) ||
-      (min_message_size_to_compress_ > 0 && message->payload()->Length() < min_message_size_to_compress_)) {
+      (flags & (GRPC_WRITE_NO_COMPRESS | GRPC_WRITE_INTERNAL_COMPRESS))) {
     return message;
   }
   // Try to compress the payload.
   SliceBuffer tmp;
   SliceBuffer* payload = message->payload();
   bool did_compress = grpc_msg_compress(algorithm, payload->c_slice_buffer(),
-                                        tmp.c_slice_buffer(), compression_options_.get());
+                                        tmp.c_slice_buffer());
   // If we achieved compression send it as compressed, otherwise send it as (to
   // avoid spending cycles on the receiver decompressing).
   if (did_compress) {

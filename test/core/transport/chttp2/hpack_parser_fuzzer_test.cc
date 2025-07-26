@@ -24,12 +24,14 @@
 #include <utility>
 
 #include "absl/cleanup/cleanup.h"
+#include "absl/random/bit_gen_ref.h"
 
 #include <grpc/grpc.h>
 #include <grpc/slice.h>
 #include <grpc/support/log.h>
 
 #include "src/core/ext/transport/chttp2/transport/hpack_parser.h"
+#include "src/core/lib/experiments/config.h"
 #include "src/core/lib/gprpp/ref_counted_ptr.h"
 #include "src/core/lib/gprpp/status_helper.h"
 #include "src/core/lib/iomgr/error.h"
@@ -40,6 +42,8 @@
 #include "src/core/lib/transport/metadata_batch.h"
 #include "src/libfuzzer/libfuzzer_macro.h"
 #include "test/core/transport/chttp2/hpack_parser_fuzzer.pb.h"
+#include "test/core/util/fuzz_config_vars.h"
+#include "test/core/util/proto_bit_gen.h"
 
 // IWYU pragma: no_include <google/protobuf/repeated_ptr_field.h>
 
@@ -50,6 +54,9 @@ static void dont_log(gpr_log_func_args* /*args*/) {}
 
 DEFINE_PROTO_FUZZER(const hpack_parser_fuzzer::Msg& msg) {
   if (squelch) gpr_set_log_function(dont_log);
+  grpc_core::ProtoBitGen proto_bit_src(msg.random_numbers());
+  grpc_core::ApplyFuzzConfigVars(msg.config_vars());
+  grpc_core::TestOnlyReloadExperimentsFromConfigVariables();
   grpc_init();
   auto cleanup = absl::MakeCleanup(grpc_shutdown);
   auto memory_allocator = grpc_core::ResourceQuota::Default()
@@ -112,7 +119,9 @@ DEFINE_PROTO_FUZZER(const hpack_parser_fuzzer::Msg& msg) {
         const auto& parse = frame.parse(idx);
         grpc_slice buffer =
             grpc_slice_from_copied_buffer(parse.data(), parse.size());
-        auto err = parser->Parse(buffer, idx == frame.parse_size() - 1);
+        auto err = parser->Parse(buffer, idx == frame.parse_size() - 1,
+                                 absl::BitGenRef(proto_bit_src),
+                                 /*call_tracer=*/nullptr);
         grpc_slice_unref(buffer);
         stop_buffering_ctr--;
         if (0 == stop_buffering_ctr) parser->StopBufferingFrame();

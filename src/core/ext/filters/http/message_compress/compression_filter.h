@@ -103,8 +103,6 @@ class CompressionFilter : public ChannelFilter {
   bool enable_compression_;
   // Is decompression enabled?
   bool enable_decompression_;
-  std::unique_ptr<grpc_core::CompressionOptions> compression_options_;
-  int min_message_size_to_compress_;
 };
 
 class ClientCompressionFilter final : public CompressionFilter {

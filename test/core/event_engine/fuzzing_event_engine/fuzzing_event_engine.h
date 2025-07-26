@@ -41,6 +41,7 @@
 
 #include "src/core/lib/gprpp/no_destruct.h"
 #include "src/core/lib/gprpp/sync.h"
+#include "src/core/lib/gprpp/time.h"
 #include "test/core/event_engine/fuzzing_event_engine/fuzzing_event_engine.pb.h"
 #include "test/core/util/port.h"
 
@@ -53,10 +54,13 @@ class FuzzingEventEngine : public EventEngine {
  public:
   struct Options {
     Duration max_delay_run_after = std::chrono::seconds(30);
+    Duration max_delay_write = std::chrono::seconds(30);
   };
   explicit FuzzingEventEngine(Options options,
                               const fuzzing_event_engine::Actions& actions);
   ~FuzzingEventEngine() override { UnsetGlobalHooks(); }
+
+  using Time = std::chrono::time_point<FuzzingEventEngine, Duration>;
 
   // Once the fuzzing work is completed, this method should be called to speed
   // quiescence.
@@ -66,6 +70,18 @@ class FuzzingEventEngine : public EventEngine {
       ABSL_LOCKS_EXCLUDED(mu_);
   // Repeatedly call Tick() until there is no more work to do.
   void TickUntilIdle() ABSL_LOCKS_EXCLUDED(mu_);
+  // Tick until some time
+  void TickUntil(Time t) ABSL_LOCKS_EXCLUDED(mu_);
+  // Tick until some gpr_timespec
+  void TickUntilTimespec(gpr_timespec t) ABSL_LOCKS_EXCLUDED(mu_);
+  // Tick until some grpc_core::Timestamp
+  void TickUntilTimestamp(grpc_core::Timestamp t) ABSL_LOCKS_EXCLUDED(mu_);
+  // Tick for some grpc_core::Duration
+  void TickForDuration(grpc_core::Duration d) ABSL_LOCKS_EXCLUDED(mu_);
+
+  // Sets a callback to be invoked any time RunAfter() is called.
+  // Allows tests to verify the specified duration.
+  void SetRunAfterDurationCallback(absl::AnyInvocable<void(Duration)> callback);
 
   absl::StatusOr<std::unique_ptr<Listener>> CreateListener(
       Listener::AcceptCallback on_accept,
@@ -84,7 +100,7 @@ class FuzzingEventEngine : public EventEngine {
 
   bool IsWorkerThread() override;
 
-  std::unique_ptr<DNSResolver> GetDNSResolver(
+  absl::StatusOr<std::unique_ptr<DNSResolver>> GetDNSResolver(
       const DNSResolver::ResolverOptions& options) override;
 
   void Run(Closure* closure) ABSL_LOCKS_EXCLUDED(mu_) override;
@@ -96,8 +112,6 @@ class FuzzingEventEngine : public EventEngine {
       ABSL_LOCKS_EXCLUDED(mu_) override;
   bool Cancel(TaskHandle handle) ABSL_LOCKS_EXCLUDED(mu_) override;
 
-  using Time = std::chrono::time_point<FuzzingEventEngine, Duration>;
-
   Time Now() ABSL_LOCKS_EXCLUDED(mu_);
 
   // Clear any global hooks installed by this event engine. Call prior to
@@ -106,6 +120,11 @@ class FuzzingEventEngine : public EventEngine {
   void UnsetGlobalHooks() ABSL_LOCKS_EXCLUDED(mu_);
 
  private:
+  enum class RunType {
+    kWrite,
+    kRunAfter,
+  };
+
   // One pending task to be run.
   struct Task {
     Task(intptr_t id, absl::AnyInvocable<void()> closure)
@@ -172,7 +191,9 @@ class FuzzingEventEngine : public EventEngine {
     // Address of each side of the endpoint.
     const ResolvedAddress addrs[2];
     // Is the endpoint closed?
-    bool closed ABSL_GUARDED_BY(mu_) = false;
+    bool closed[2] ABSL_GUARDED_BY(mu_) = {false, false};
+    // Is the endpoint writing?
+    bool writing[2] ABSL_GUARDED_BY(mu_) = {false, false};
     // Bytes written into each endpoint and awaiting a read.
     std::vector<uint8_t> pending[2] ABSL_GUARDED_BY(mu_);
     // The sizes of each accepted write, as determined by the fuzzer actions.
@@ -223,12 +244,13 @@ class FuzzingEventEngine : public EventEngine {
     const int index_;
   };
 
-  void RunLocked(absl::AnyInvocable<void()> closure)
+  void RunLocked(RunType run_type, absl::AnyInvocable<void()> closure)
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
-    RunAfterLocked(Duration::zero(), std::move(closure));
+    RunAfterLocked(run_type, Duration::zero(), std::move(closure));
   }
 
-  TaskHandle RunAfterLocked(Duration when, absl::AnyInvocable<void()> closure)
+  TaskHandle RunAfterLocked(RunType run_type, Duration when,
+                            absl::AnyInvocable<void()> closure)
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
   // Allocate a port. Considered fuzzer selected port orderings first, and then
@@ -252,7 +274,7 @@ class FuzzingEventEngine : public EventEngine {
 
   Duration exponential_gate_time_increment_ ABSL_GUARDED_BY(mu_) =
       std::chrono::milliseconds(1);
-  const Duration max_delay_run_after_;
+  const Duration max_delay_[2];
   intptr_t next_task_id_ ABSL_GUARDED_BY(mu_);
   intptr_t current_tick_ ABSL_GUARDED_BY(now_mu_);
   Time now_ ABSL_GUARDED_BY(now_mu_);
@@ -272,6 +294,10 @@ class FuzzingEventEngine : public EventEngine {
   std::queue<std::queue<size_t>> write_sizes_for_future_connections_
       ABSL_GUARDED_BY(mu_);
   grpc_pick_port_functions previous_pick_port_functions_;
+
+  grpc_core::Mutex run_after_duration_callback_mu_;
+  absl::AnyInvocable<void(Duration)> run_after_duration_callback_
+      ABSL_GUARDED_BY(run_after_duration_callback_mu_);
 };
 
 }  // namespace experimental

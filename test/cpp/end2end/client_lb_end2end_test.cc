@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <algorithm>
+#include <chrono>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -56,9 +57,11 @@
 #include "src/core/lib/backoff/backoff.h"
 #include "src/core/lib/channel/channel_args.h"
 #include "src/core/lib/config/config_vars.h"
+#include "src/core/lib/experiments/experiments.h"
 #include "src/core/lib/gprpp/crash.h"
 #include "src/core/lib/gprpp/debug_location.h"
 #include "src/core/lib/gprpp/env.h"
+#include "src/core/lib/gprpp/notification.h"
 #include "src/core/lib/gprpp/ref_counted_ptr.h"
 #include "src/core/lib/gprpp/time.h"
 #include "src/core/lib/iomgr/tcp_client.h"
@@ -212,22 +215,18 @@ class FakeResolverResponseGeneratorWrapper {
     response_generator_ = std::move(other.response_generator_);
   }
 
-  void SetNextResolution(
-      const std::vector<int>& ports, const char* service_config_json = nullptr,
-      const char* attribute_key = nullptr,
-      std::unique_ptr<grpc_core::ServerAddress::AttributeInterface> attribute =
-          nullptr,
-      const grpc_core::ChannelArgs& per_address_args =
-          grpc_core::ChannelArgs()) {
+  void SetNextResolution(const std::vector<int>& ports,
+                         const char* service_config_json = nullptr,
+                         const grpc_core::ChannelArgs& per_address_args =
+                             grpc_core::ChannelArgs()) {
     grpc_core::ExecCtx exec_ctx;
-    response_generator_->SetResponse(
-        BuildFakeResults(ipv6_only_, ports, service_config_json, attribute_key,
-                         std::move(attribute), per_address_args));
+    response_generator_->SetResponseSynchronously(BuildFakeResults(
+        ipv6_only_, ports, service_config_json, per_address_args));
   }
 
   void SetNextResolutionUponError(const std::vector<int>& ports) {
     grpc_core::ExecCtx exec_ctx;
-    response_generator_->SetReresolutionResponse(
+    response_generator_->SetReresolutionResponseSynchronously(
         BuildFakeResults(ipv6_only_, ports));
   }
 
@@ -238,7 +237,7 @@ class FakeResolverResponseGeneratorWrapper {
 
   void SetResponse(grpc_core::Resolver::Result result) {
     grpc_core::ExecCtx exec_ctx;
-    response_generator_->SetResponse(std::move(result));
+    response_generator_->SetResponseSynchronously(std::move(result));
   }
 
   grpc_core::FakeResolverResponseGenerator* Get() const {
@@ -249,9 +248,6 @@ class FakeResolverResponseGeneratorWrapper {
   static grpc_core::Resolver::Result BuildFakeResults(
       bool ipv6_only, const std::vector<int>& ports,
       const char* service_config_json = nullptr,
-      const char* attribute_key = nullptr,
-      std::unique_ptr<grpc_core::ServerAddress::AttributeInterface> attribute =
-          nullptr,
       const grpc_core::ChannelArgs& per_address_args =
           grpc_core::ChannelArgs()) {
     grpc_core::Resolver::Result result;
@@ -262,14 +258,7 @@ class FakeResolverResponseGeneratorWrapper {
       GPR_ASSERT(lb_uri.ok());
       grpc_resolved_address address;
       GPR_ASSERT(grpc_parse_uri(*lb_uri, &address));
-      std::map<const char*,
-               std::unique_ptr<grpc_core::ServerAddress::AttributeInterface>>
-          attributes;
-      if (attribute != nullptr) {
-        attributes[attribute_key] = attribute->Copy();
-      }
-      result.addresses->emplace_back(address, per_address_args,
-                                     std::move(attributes));
+      result.addresses->emplace_back(address, per_address_args);
     }
     if (result.addresses->empty()) {
       result.resolution_note = "fake resolver empty address list";
@@ -647,10 +636,14 @@ TEST_F(ClientLbEnd2endTest, ChannelStateConnectingWhenResolving) {
   // Note that this call also returns IDLE, since the state change has
   // not yet occurred; it just gets triggered by this call.
   EXPECT_EQ(channel->GetState(true /* try_to_connect */), GRPC_CHANNEL_IDLE);
-  // Now that the channel is trying to connect, we should be in state
+  // Now that the channel is trying to connect, we should get to state
   // CONNECTING.
-  EXPECT_EQ(channel->GetState(false /* try_to_connect */),
-            GRPC_CHANNEL_CONNECTING);
+  ASSERT_TRUE(
+      WaitForChannelState(channel.get(), [&](grpc_connectivity_state state) {
+        if (state == GRPC_CHANNEL_IDLE) return false;
+        EXPECT_EQ(state, GRPC_CHANNEL_CONNECTING);
+        return true;
+      }));
   // Return a resolver result, which allows the connection attempt to proceed.
   response_generator.SetNextResolution(GetServersPorts());
   // We should eventually transition into state READY.
@@ -717,7 +710,6 @@ TEST_F(ClientLbEnd2endTest, AuthorityOverrideFromResolver) {
   // different value.
   response_generator.SetNextResolution(
       GetServersPorts(), /*service_config_json=*/nullptr,
-      /*attribute_key=*/nullptr, /*attribute=*/nullptr,
       grpc_core::ChannelArgs().Set(GRPC_ARG_DEFAULT_AUTHORITY,
                                    "foo.example.com"));
   // Send an RPC.
@@ -744,7 +736,6 @@ TEST_F(ClientLbEnd2endTest, AuthorityOverridePrecedence) {
   // different value.
   response_generator.SetNextResolution(
       GetServersPorts(), /*service_config_json=*/nullptr,
-      /*attribute_key=*/nullptr, /*attribute=*/nullptr,
       grpc_core::ChannelArgs().Set(GRPC_ARG_DEFAULT_AUTHORITY,
                                    "bar.example.com"));
   // Send an RPC.
@@ -845,32 +836,36 @@ TEST_F(PickFirstTest, BackOffInitialReconnect) {
   args.SetInt(GRPC_ARG_INITIAL_RECONNECT_BACKOFF_MS,
               kInitialBackOffMs * grpc_test_slowdown_factor());
   const std::vector<int> ports = {grpc_pick_unused_port_or_die()};
-  const gpr_timespec t0 = gpr_now(GPR_CLOCK_MONOTONIC);
   auto response_generator = BuildResolverResponseGenerator();
   auto channel = BuildChannel("pick_first", response_generator, args);
   auto stub = BuildStub(channel);
   response_generator.SetNextResolution(ports);
-  // The channel won't become connected (there's no server).
-  ASSERT_FALSE(channel->WaitForConnected(
-      grpc_timeout_milliseconds_to_deadline(kInitialBackOffMs * 2)));
+  // Start trying to connect.  The channel will report
+  // TRANSIENT_FAILURE, because the server is not reachable.
+  const grpc_core::Timestamp t0 = grpc_core::Timestamp::Now();
+  ASSERT_TRUE(WaitForChannelState(
+      channel.get(),
+      [&](grpc_connectivity_state state) {
+        if (state == GRPC_CHANNEL_TRANSIENT_FAILURE) return true;
+        EXPECT_THAT(state, ::testing::AnyOf(GRPC_CHANNEL_IDLE,
+                                            GRPC_CHANNEL_CONNECTING));
+        return false;
+      },
+      /*try_to_connect=*/true));
   // Bring up a server on the chosen port.
   StartServers(1, ports);
-  // Now it will.
-  ASSERT_TRUE(channel->WaitForConnected(
-      grpc_timeout_milliseconds_to_deadline(kInitialBackOffMs * 2)));
-  const gpr_timespec t1 = gpr_now(GPR_CLOCK_MONOTONIC);
-  const grpc_core::Duration waited =
-      grpc_core::Duration::FromTimespec(gpr_time_sub(t1, t0));
+  // Now the channel will become connected.
+  ASSERT_TRUE(WaitForChannelReady(channel.get()));
+  // Check how long it took.
+  const grpc_core::Duration waited = grpc_core::Timestamp::Now() - t0;
   gpr_log(GPR_DEBUG, "Waited %" PRId64 " milliseconds", waited.millis());
   // We should have waited at least kInitialBackOffMs. We substract one to
   // account for test and precision accuracy drift.
   EXPECT_GE(waited.millis(),
             (kInitialBackOffMs * grpc_test_slowdown_factor()) - 1);
   // But not much more.
-  EXPECT_GT(
-      gpr_time_cmp(
-          grpc_timeout_milliseconds_to_deadline(kInitialBackOffMs * 1.10), t1),
-      0);
+  EXPECT_LE(waited.millis(),
+            (kInitialBackOffMs * grpc_test_slowdown_factor()) * 1.3);
 }
 
 TEST_F(PickFirstTest, BackOffMinReconnect) {
@@ -1037,30 +1032,22 @@ TEST_F(
   // Channel 2 should continue to report CONNECTING.
   EXPECT_EQ(GRPC_CHANNEL_TRANSIENT_FAILURE, channel1->GetState(false));
   EXPECT_EQ(GRPC_CHANNEL_CONNECTING, channel2->GetState(false));
-  // Inject a hold for port 2, which will eventually be tried by channel 2.
-  auto hold_channel2_port2 = injector.AddHold(ports2[2]);
   // Allow channel 2 to resume port 0.  Port 0 will fail, as will port 1.
+  // When it gets to port 2, it will see it already in state
+  // TRANSIENT_FAILURE due to being shared with channel 1, so it won't
+  // trigger another connection attempt.
   gpr_log(GPR_INFO, "=== RESUMING CHANNEL 2 PORT 0 ===");
   hold_channel2_port0->Resume();
-  // Wait for channel 2 to try port 2.
-  gpr_log(GPR_INFO, "=== WAITING FOR CHANNEL 2 PORT 2 ===");
-  hold_channel2_port2->Wait();
-  gpr_log(GPR_INFO, "=== CHANNEL 2 PORT 2 STARTED ===");
-  // Channel 2 should still be CONNECTING here.
-  EXPECT_EQ(GRPC_CHANNEL_CONNECTING, channel2->GetState(false));
-  // Add a hold for channel 2 port 0.
-  hold_channel2_port0 = injector.AddHold(ports2[0]);
-  gpr_log(GPR_INFO, "=== RESUMING CHANNEL 2 PORT 2 ===");
-  hold_channel2_port2->Resume();
-  // Wait for channel 2 to retry port 0.
-  gpr_log(GPR_INFO, "=== WAITING FOR CHANNEL 2 PORT 0 ===");
-  hold_channel2_port0->Wait();
-  // Now channel 2 should be reporting TRANSIENT_FAILURE.
-  EXPECT_EQ(GRPC_CHANNEL_TRANSIENT_FAILURE, channel2->GetState(false));
+  // Channel 2 should soon report TRANSIENT_FAILURE.
+  EXPECT_TRUE(
+      WaitForChannelState(channel2.get(), [](grpc_connectivity_state state) {
+        if (state == GRPC_CHANNEL_TRANSIENT_FAILURE) return true;
+        EXPECT_EQ(state, GRPC_CHANNEL_CONNECTING);
+        return false;
+      }));
   // Clean up.
-  gpr_log(GPR_INFO, "=== RESUMING CHANNEL 1 PORT 0 AND CHANNEL 2 PORT 0 ===");
+  gpr_log(GPR_INFO, "=== RESUMING CHANNEL 1 PORT 0 ===");
   hold_channel1_port0->Resume();
-  hold_channel2_port0->Resume();
 }
 
 TEST_F(PickFirstTest, Updates) {
@@ -1070,44 +1057,24 @@ TEST_F(PickFirstTest, Updates) {
   auto response_generator = BuildResolverResponseGenerator();
   auto channel = BuildChannel("pick_first", response_generator);
   auto stub = BuildStub(channel);
-
-  std::vector<int> ports;
-
   // Perform one RPC against the first server.
-  ports.emplace_back(servers_[0]->port_);
-  response_generator.SetNextResolution(ports);
+  response_generator.SetNextResolution(GetServersPorts(0, 1));
   gpr_log(GPR_INFO, "****** SET [0] *******");
   CheckRpcSendOk(DEBUG_LOCATION, stub);
   EXPECT_EQ(servers_[0]->service_.request_count(), 1);
-
   // An empty update will result in the channel going into TRANSIENT_FAILURE.
-  ports.clear();
-  response_generator.SetNextResolution(ports);
+  response_generator.SetNextResolution({});
   gpr_log(GPR_INFO, "****** SET none *******");
-  grpc_connectivity_state channel_state;
-  do {
-    channel_state = channel->GetState(true /* try to connect */);
-  } while (channel_state == GRPC_CHANNEL_READY);
-  ASSERT_NE(channel_state, GRPC_CHANNEL_READY);
-  servers_[0]->service_.ResetCounters();
-
+  WaitForChannelNotReady(channel.get());
   // Next update introduces servers_[1], making the channel recover.
-  ports.clear();
-  ports.emplace_back(servers_[1]->port_);
-  response_generator.SetNextResolution(ports);
+  response_generator.SetNextResolution(GetServersPorts(1, 2));
   gpr_log(GPR_INFO, "****** SET [1] *******");
+  WaitForChannelReady(channel.get());
   WaitForServer(DEBUG_LOCATION, stub, 1);
-  EXPECT_EQ(servers_[0]->service_.request_count(), 0);
-
   // And again for servers_[2]
-  ports.clear();
-  ports.emplace_back(servers_[2]->port_);
-  response_generator.SetNextResolution(ports);
+  response_generator.SetNextResolution(GetServersPorts(2, 3));
   gpr_log(GPR_INFO, "****** SET [2] *******");
   WaitForServer(DEBUG_LOCATION, stub, 2);
-  EXPECT_EQ(servers_[0]->service_.request_count(), 0);
-  EXPECT_EQ(servers_[1]->service_.request_count(), 0);
-
   // Check LB policy name for the channel.
   EXPECT_EQ("pick_first", channel->GetLoadBalancingPolicyName());
 }
@@ -1338,6 +1305,7 @@ TEST_F(PickFirstTest, FailsEmptyResolverUpdate) {
   grpc_core::Resolver::Result result;
   result.addresses.emplace();
   result.result_health_callback = [&](absl::Status status) {
+    gpr_log(GPR_INFO, "****** RESULT HEALTH CALLBACK *******");
     EXPECT_EQ(absl::StatusCode::kUnavailable, status.code());
     EXPECT_EQ("address list must not be empty", status.message()) << status;
     notification.Notify();
@@ -1350,8 +1318,8 @@ TEST_F(PickFirstTest, FailsEmptyResolverUpdate) {
   };
   EXPECT_TRUE(
       WaitForChannelState(channel.get(), predicate, /*try_to_connect=*/true));
-  // Callback should have been run.
-  ASSERT_TRUE(notification.HasBeenNotified());
+  // Callback should run.
+  notification.WaitForNotification();
   // Return a valid address.
   gpr_log(GPR_INFO, "****** SENDING NEXT RESOLVER RESULT *******");
   StartServers(1);
@@ -1646,6 +1614,7 @@ TEST_F(RoundRobinTest, Updates) {
   ports.clear();
   ports.emplace_back(servers_[1]->port_);
   response_generator.SetNextResolution(ports);
+  WaitForChannelReady(channel.get());
   WaitForServer(DEBUG_LOCATION, stub, 1);
   EXPECT_EQ(GRPC_CHANNEL_READY, channel->GetState(/*try_to_connect=*/false));
   // Check LB policy name for the channel.
@@ -1760,7 +1729,7 @@ TEST_F(RoundRobinTest, FailsEmptyResolverUpdate) {
   EXPECT_TRUE(
       WaitForChannelState(channel.get(), predicate, /*try_to_connect=*/true));
   // Callback should have been run.
-  ASSERT_TRUE(notification.HasBeenNotified());
+  notification.WaitForNotification();
   // Return a valid address.
   gpr_log(GPR_INFO, "****** SENDING NEXT RESOLVER RESULT *******");
   StartServers(1);
@@ -2094,9 +2063,15 @@ TEST_F(RoundRobinTest, HealthChecking) {
   servers_[1]->SetServingStatus("health_check_service_name", false);
   servers_[2]->SetServingStatus("health_check_service_name", false);
   EXPECT_TRUE(WaitForChannelNotReady(channel.get()));
-  CheckRpcSendFailure(DEBUG_LOCATION, stub, StatusCode::UNAVAILABLE,
-                      "connections to all backends failing; last error: "
-                      "UNAVAILABLE: backend unhealthy");
+  CheckRpcSendFailure(
+      DEBUG_LOCATION, stub, StatusCode::UNAVAILABLE,
+      grpc_core::IsRoundRobinDelegateToPickFirstEnabled()
+          ? "connections to all backends failing; last error: "
+            "(ipv6:%5B::1%5D|ipv4:127.0.0.1):[0-9]+: "
+            "backend unhealthy"
+          : "connections to all backends failing; last error: "
+            "UNAVAILABLE: (ipv6:%5B::1%5D|ipv4:127.0.0.1):[0-9]+: "
+            "backend unhealthy");
   // Clean up.
   EnableDefaultHealthCheckService(false);
 }
@@ -2152,9 +2127,15 @@ TEST_F(RoundRobinTest, WithHealthCheckingInhibitPerChannel) {
   // First channel should not become READY, because health checks should be
   // failing.
   EXPECT_FALSE(WaitForChannelReady(channel1.get(), 1));
-  CheckRpcSendFailure(DEBUG_LOCATION, stub1, StatusCode::UNAVAILABLE,
-                      "connections to all backends failing; last error: "
-                      "UNAVAILABLE: backend unhealthy");
+  CheckRpcSendFailure(
+      DEBUG_LOCATION, stub1, StatusCode::UNAVAILABLE,
+      grpc_core::IsRoundRobinDelegateToPickFirstEnabled()
+          ? "connections to all backends failing; last error: "
+            "(ipv6:%5B::1%5D|ipv4:127.0.0.1):[0-9]+: "
+            "backend unhealthy"
+          : "connections to all backends failing; last error: "
+            "UNAVAILABLE: (ipv6:%5B::1%5D|ipv4:127.0.0.1):[0-9]+: "
+            "backend unhealthy");
   // Second channel should be READY.
   EXPECT_TRUE(WaitForChannelReady(channel2.get(), 1));
   CheckRpcSendOk(DEBUG_LOCATION, stub2);
@@ -2197,9 +2178,15 @@ TEST_F(RoundRobinTest, HealthCheckingServiceNamePerChannel) {
   // First channel should not become READY, because health checks should be
   // failing.
   EXPECT_FALSE(WaitForChannelReady(channel1.get(), 1));
-  CheckRpcSendFailure(DEBUG_LOCATION, stub1, StatusCode::UNAVAILABLE,
-                      "connections to all backends failing; last error: "
-                      "UNAVAILABLE: backend unhealthy");
+  CheckRpcSendFailure(
+      DEBUG_LOCATION, stub1, StatusCode::UNAVAILABLE,
+      grpc_core::IsRoundRobinDelegateToPickFirstEnabled()
+          ? "connections to all backends failing; last error: "
+            "(ipv6:%5B::1%5D|ipv4:127.0.0.1):[0-9]+: "
+            "backend unhealthy"
+          : "connections to all backends failing; last error: "
+            "UNAVAILABLE: (ipv6:%5B::1%5D|ipv4:127.0.0.1):[0-9]+: "
+            "backend unhealthy");
   // Second channel should be READY.
   EXPECT_TRUE(WaitForChannelReady(channel2.get(), 1));
   CheckRpcSendOk(DEBUG_LOCATION, stub2);
@@ -2847,31 +2834,11 @@ TEST_F(ClientLbInterceptTrailingMetadataTest, BackendMetricDataMerge) {
 }
 
 //
-// tests that address attributes from the resolver are visible to the LB policy
+// tests that address args from the resolver are visible to the LB policy
 //
 
 class ClientLbAddressTest : public ClientLbEnd2endTest {
  protected:
-  static const char* kAttributeKey;
-
-  class Attribute : public grpc_core::ServerAddress::AttributeInterface {
-   public:
-    explicit Attribute(const std::string& str) : str_(str) {}
-
-    std::unique_ptr<AttributeInterface> Copy() const override {
-      return std::make_unique<Attribute>(str_);
-    }
-
-    int Cmp(const AttributeInterface* other) const override {
-      return str_.compare(static_cast<const Attribute*>(other)->str_);
-    }
-
-    std::string ToString() const override { return str_; }
-
-   private:
-    std::string str_;
-  };
-
   void SetUp() override {
     ClientLbEnd2endTest::SetUp();
     current_test_instance_ = this;
@@ -2909,8 +2876,6 @@ class ClientLbAddressTest : public ClientLbEnd2endTest {
   std::vector<std::string> addresses_seen_;
 };
 
-const char* ClientLbAddressTest::kAttributeKey = "attribute_key";
-
 ClientLbAddressTest* ClientLbAddressTest::current_test_instance_ = nullptr;
 
 TEST_F(ClientLbAddressTest, Basic) {
@@ -2919,19 +2884,18 @@ TEST_F(ClientLbAddressTest, Basic) {
   auto response_generator = BuildResolverResponseGenerator();
   auto channel = BuildChannel("address_test_lb", response_generator);
   auto stub = BuildStub(channel);
-  // Addresses returned by the resolver will have attached attributes.
-  response_generator.SetNextResolution(GetServersPorts(), nullptr,
-                                       kAttributeKey,
-                                       std::make_unique<Attribute>("foo"));
+  // Addresses returned by the resolver will have attached args.
+  response_generator.SetNextResolution(
+      GetServersPorts(), nullptr,
+      grpc_core::ChannelArgs().Set("test_key", "test_value"));
   CheckRpcSendOk(DEBUG_LOCATION, stub);
   // Check LB policy name for the channel.
   EXPECT_EQ("address_test_lb", channel->GetLoadBalancingPolicyName());
   // Make sure that the attributes wind up on the subchannels.
   std::vector<std::string> expected;
   for (const int port : GetServersPorts()) {
-    expected.emplace_back(absl::StrCat(
-        ipv6_only_ ? "[::1]:" : "127.0.0.1:", port, " attributes={",
-        kAttributeKey, "=foo, disable_outlier_detection=true}"));
+    expected.emplace_back(absl::StrCat(ipv6_only_ ? "[::1]:" : "127.0.0.1:",
+                                       port, " args={test_key=test_value}"));
   }
   EXPECT_EQ(addresses_seen(), expected);
 }

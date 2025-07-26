@@ -18,13 +18,9 @@
 
 #include <grpc/support/port_platform.h>
 
-#include "src/core/lib/channel/channel_args.h"
 #include "src/core/lib/compression/message_compress.h"
 
 #include <string.h>
-#include <zconf.h>
-
-#include <memory>
 
 #include <zconf.h>
 #include <zlib.h>
@@ -34,32 +30,6 @@
 #include <grpc/support/log.h>
 
 #include "src/core/lib/slice/slice.h"
-
-namespace grpc_core {
-
-class GzipCompressionOptionsImpl : public CompressionOptions {
- public:
-  GzipCompressionOptionsImpl(): gzip_compression_level_(Z_DEFAULT_COMPRESSION) {}
-  explicit GzipCompressionOptionsImpl(const ChannelArgs& args)
-      : gzip_compression_level_(
-        Clamp(
-    args.GetInt(GRPC_ARG_GZIP_COMPRESSION_LEVEL).value_or(Z_DEFAULT_COMPRESSION),
-    Z_NO_COMPRESSION, Z_BEST_COMPRESSION)) {}
-
-  int gzip_compression_level() const { return gzip_compression_level_; }
-
- private:
-  int gzip_compression_level_;
-};
-
-std::unique_ptr<CompressionOptions> MakeCompressionOptions(
-    const ChannelArgs& args) {
-  return absl::make_unique<GzipCompressionOptionsImpl>(args);
-}
-std::unique_ptr<CompressionOptions> MakeCompressionOptions() {
-  return absl::make_unique<GzipCompressionOptionsImpl>();
-}
-}  // namespace grpc_core
 
 #define OUTPUT_BLOCK_SIZE 1024
 
@@ -124,8 +94,7 @@ static void* zalloc_gpr(void* /*opaque*/, unsigned int items,
 static void zfree_gpr(void* /*opaque*/, void* address) { gpr_free(address); }
 
 static int zlib_compress(grpc_slice_buffer* input, grpc_slice_buffer* output,
-                         int gzip,
-                         const grpc_core::GzipCompressionOptionsImpl* options) {
+                         int gzip) {
   z_stream zs;
   int r;
   size_t i;
@@ -134,8 +103,8 @@ static int zlib_compress(grpc_slice_buffer* input, grpc_slice_buffer* output,
   memset(&zs, 0, sizeof(zs));
   zs.zalloc = zalloc_gpr;
   zs.zfree = zfree_gpr;
-  r = deflateInit2(&zs, options->gzip_compression_level(), Z_DEFLATED,
-                   15 | (gzip ? 16 : 0), 8, Z_DEFAULT_STRATEGY);
+  r = deflateInit2(&zs, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 | (gzip ? 16 : 0),
+                   8, Z_DEFAULT_STRATEGY);
   GPR_ASSERT(r == Z_OK);
   r = zlib_body(&zs, input, output, deflate) && output->length < input->length;
   if (!r) {
@@ -181,19 +150,17 @@ static int copy(grpc_slice_buffer* input, grpc_slice_buffer* output) {
   return 1;
 }
 
-static int compress_inner(
-    grpc_compression_algorithm algorithm, grpc_slice_buffer* input,
-    grpc_slice_buffer* output,
-    const grpc_core::GzipCompressionOptionsImpl* options) {
+static int compress_inner(grpc_compression_algorithm algorithm,
+                          grpc_slice_buffer* input, grpc_slice_buffer* output) {
   switch (algorithm) {
     case GRPC_COMPRESS_NONE:
       // the fallback path always needs to be send uncompressed: we simply
       // rely on that here
       return 0;
     case GRPC_COMPRESS_DEFLATE:
-      return zlib_compress(input, output, 0, options);
+      return zlib_compress(input, output, 0);
     case GRPC_COMPRESS_GZIP:
-      return zlib_compress(input, output, 1, options);
+      return zlib_compress(input, output, 1);
     case GRPC_COMPRESS_ALGORITHMS_COUNT:
       break;
   }
@@ -202,11 +169,8 @@ static int compress_inner(
 }
 
 int grpc_msg_compress(grpc_compression_algorithm algorithm,
-                      grpc_slice_buffer* input, grpc_slice_buffer* output,
-                      const grpc_core::CompressionOptions* options) {
-  auto compression_options =
-      static_cast<const grpc_core::GzipCompressionOptionsImpl*>(options);
-  if (!compress_inner(algorithm, input, output, compression_options)) {
+                      grpc_slice_buffer* input, grpc_slice_buffer* output) {
+  if (!compress_inner(algorithm, input, output)) {
     copy(input, output);
     return 0;
   }

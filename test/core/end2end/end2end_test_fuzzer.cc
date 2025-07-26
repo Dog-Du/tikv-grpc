@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <stdio.h>
+
 #include <algorithm>
 #include <chrono>
 #include <memory>
@@ -44,7 +46,6 @@
 #include "test/core/event_engine/fuzzing_event_engine/fuzzing_event_engine.h"
 #include "test/core/event_engine/fuzzing_event_engine/fuzzing_event_engine.pb.h"
 #include "test/core/util/fuzz_config_vars.h"
-#include "test/core/util/fuzz_config_vars.pb.h"
 
 using ::grpc_event_engine::experimental::FuzzingEventEngine;
 using ::grpc_event_engine::experimental::GetDefaultEventEngine;
@@ -93,23 +94,16 @@ DEFINE_PROTO_FUZZER(const core_end2end_test_fuzzer::Msg& msg) {
                      test.make_test(test.config));
                }});
     }
-    GPR_ASSERT(!tests.empty());
     std::sort(tests.begin(), tests.end(),
               [](const Test& a, const Test& b) { return a.name < b.name; });
     return tests;
   }();
-  static const auto only_experiment =
-      grpc_core::GetEnv("GRPC_TEST_FUZZER_EXPERIMENT");
+  if (tests.empty()) return;
 
   const int test_id = msg.test_id() % tests.size();
 
   if (squelch && !grpc_core::GetEnv("GRPC_TRACE_FUZZER").has_value()) {
     gpr_set_log_function(dont_log);
-  }
-
-  if (only_experiment.has_value() &&
-      msg.config_vars().experiments() != only_experiment.value()) {
-    return;
   }
 
   // TODO(ctiller): make this per fixture?
@@ -121,14 +115,17 @@ DEFINE_PROTO_FUZZER(const core_end2end_test_fuzzer::Msg& msg) {
   grpc_event_engine::experimental::SetEventEngineFactory(
       [actions = msg.event_engine_actions()]() {
         FuzzingEventEngine::Options options;
-        options.max_delay_run_after = std::chrono::milliseconds(1500);
+        options.max_delay_run_after = std::chrono::milliseconds(500);
+        options.max_delay_write = std::chrono::milliseconds(50);
         return std::make_unique<FuzzingEventEngine>(options, actions);
       });
   auto engine =
       std::dynamic_pointer_cast<FuzzingEventEngine>(GetDefaultEventEngine());
 
+  if (!squelch) {
+    fprintf(stderr, "RUN TEST: %s\n", tests[test_id].name.c_str());
+  }
   auto test = tests[test_id].factory();
-  test->SetCrashOnStepFailure();
   test->SetQuiesceEventEngine(
       [](std::shared_ptr<grpc_event_engine::experimental::EventEngine>&& ee) {
         static_cast<FuzzingEventEngine*>(ee.get())->TickUntilIdle();
