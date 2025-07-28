@@ -3166,6 +3166,8 @@ add_library(grpc_unsecure
   ${gRPC_ADDITIONAL_DLL_SRC}
 )
 
+target_link_libraries(grpc_unsecure re2)
+
 target_compile_features(grpc_unsecure PUBLIC cxx_std_14)
 
 set_target_properties(grpc_unsecure PROPERTIES
@@ -3408,6 +3410,73 @@ add_library(upb ${_gRPC_STATIC_WIN32}
   third_party/upb/upb/wire/encode.c
   third_party/upb/upb/wire/eps_copy_input_stream.c
   third_party/upb/upb/wire/reader.c
+
+  third_party/upb/upb/base/status.c
+  third_party/upb/upb/collections/array.c
+  third_party/upb/upb/collections/map.c
+  third_party/upb/upb/collections/map_sorter.c
+  third_party/upb/upb/hash/common.c
+  third_party/upb/upb/mem/alloc.c
+  third_party/upb/upb/mem/arena.c
+  third_party/upb/upb/message/message.c
+  third_party/upb/upb/mini_table/extension_registry.c
+  third_party/upb/upb/mini_table/internal/message.c
+  third_party/upb/upb/mini_table/message.c
+
+  src/core/ext/upb-generated/google/protobuf/descriptor.upb.c
+  third_party/upb/upb/json/decode.c
+  third_party/upb/upb/json/encode.c
+  third_party/upb/upb/message/accessors.c
+  third_party/upb/upb/mini_descriptor/build_enum.c
+  third_party/upb/upb/mini_descriptor/decode.c
+  third_party/upb/upb/mini_descriptor/internal/base92.c
+  third_party/upb/upb/mini_descriptor/internal/encode.c
+  third_party/upb/upb/mini_descriptor/link.c
+  third_party/upb/upb/reflection/def_builder.c
+  third_party/upb/upb/reflection/def_pool.c
+  third_party/upb/upb/reflection/def_type.c
+  third_party/upb/upb/reflection/desc_state.c
+  third_party/upb/upb/reflection/enum_def.c
+  third_party/upb/upb/reflection/enum_reserved_range.c
+  third_party/upb/upb/reflection/enum_value_def.c
+  third_party/upb/upb/reflection/extension_range.c
+  third_party/upb/upb/reflection/field_def.c
+  third_party/upb/upb/reflection/file_def.c
+  third_party/upb/upb/reflection/message.c
+  third_party/upb/upb/reflection/message_def.c
+  third_party/upb/upb/reflection/message_reserved_range.c
+  third_party/upb/upb/reflection/method_def.c
+  third_party/upb/upb/reflection/oneof_def.c
+  third_party/upb/upb/reflection/service_def.c
+
+  src/core/ext/upb-generated/google/protobuf/descriptor.upb.c
+  third_party/upb/upb/message/accessors.c
+  third_party/upb/upb/mini_descriptor/build_enum.c
+  third_party/upb/upb/mini_descriptor/decode.c
+  third_party/upb/upb/mini_descriptor/internal/base92.c
+  third_party/upb/upb/mini_descriptor/internal/encode.c
+  third_party/upb/upb/mini_descriptor/link.c
+  third_party/upb/upb/reflection/def_builder.c
+  third_party/upb/upb/reflection/def_pool.c
+  third_party/upb/upb/reflection/def_type.c
+  third_party/upb/upb/reflection/desc_state.c
+  third_party/upb/upb/reflection/enum_def.c
+  third_party/upb/upb/reflection/enum_reserved_range.c
+  third_party/upb/upb/reflection/enum_value_def.c
+  third_party/upb/upb/reflection/extension_range.c
+  third_party/upb/upb/reflection/field_def.c
+  third_party/upb/upb/reflection/file_def.c
+  third_party/upb/upb/reflection/message.c
+  third_party/upb/upb/reflection/message_def.c
+  third_party/upb/upb/reflection/message_reserved_range.c
+  third_party/upb/upb/reflection/method_def.c
+  third_party/upb/upb/reflection/oneof_def.c
+  third_party/upb/upb/reflection/service_def.c
+  third_party/upb/upb/text/encode.c
+
+  third_party/utf8_range/naive.c
+  third_party/utf8_range/range2-neon.c
+  third_party/utf8_range/range2-sse.c
 )
 
 target_compile_features(upb PUBLIC cxx_std_14)
@@ -29841,7 +29910,7 @@ generate_pkgconfig(
   "high performance general RPC framework without SSL"
   "${gRPC_CORE_VERSION}"
   "absl_algorithm_container absl_any_invocable absl_base absl_bind_front absl_cleanup absl_cord absl_core_headers absl_flags absl_flags_marshalling absl_flat_hash_map absl_flat_hash_set absl_function_ref absl_hash absl_inlined_vector absl_memory absl_optional absl_random_bit_gen_ref absl_random_distributions absl_random_random absl_span absl_status absl_statusor absl_str_format absl_strings absl_synchronization absl_time absl_type_traits absl_utility absl_variant gpr"
-  "libcares zlib"
+  "re2 libcares zlib"
   "-lgrpc_unsecure"
   "-laddress_sorting -lupb -lutf8_range_lib -lupb_collections_lib"
   "grpc_unsecure.pc")
