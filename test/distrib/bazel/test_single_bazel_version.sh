@@ -63,11 +63,8 @@ EXCLUDED_TARGETS=(
 
   # Analyzing windows toolchains when running on linux results in an error.
   # Since bazel distribtests are run on linux, we exclude the windows RBE toolchains.
-  "-//third_party/toolchains/rbe_windows_bazel_6.3.2_vs2019/..."
+  "-//third_party/toolchains/rbe_windows_vs2022_bazel7/..."
   "-//third_party/toolchains:rbe_windows_default_toolchain_suite"
-
-  # TODO(jtattermusch): add back once fixed
-  "-//examples/android/binder/..."
 
   # Exclude bazelified tests as they contain some bazel hackery
   "-//tools/bazelify_tests/..."
@@ -86,8 +83,8 @@ do
   SHARD_RAN=""
   if [ "${TEST_SHARD}" == "buildtest" ] ; then
     tools/bazel version | grep "$VERSION" || { echo "Detected bazel version did not match expected value of $VERSION" >/dev/stderr; exit 1; }
-    tools/bazel build "${ACTION_ENV_FLAG}" -- //... "${EXCLUDED_TARGETS[@]}" || FAILED_TESTS="${FAILED_TESTS}buildtest "
-    tools/bazel build "${ACTION_ENV_FLAG}" --config fuzztest -- //fuzztest/... || FAILED_TESTS="${FAILED_TESTS}fuzztest_buildtest "
+    tools/bazel build "${ACTION_ENV_FLAG}" --build_tag_filters='-experiment_variation' -- //... "${EXCLUDED_TARGETS[@]}" || FAILED_TESTS="${FAILED_TESTS}buildtest "
+    tools/bazel build "${ACTION_ENV_FLAG}" --config fuzztest --build_tag_filters='-experiment_variation' -- //fuzztest/... || FAILED_TESTS="${FAILED_TESTS}fuzztest_buildtest "
     SHARD_RAN="true"
   fi
 
