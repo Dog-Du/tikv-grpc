@@ -66,7 +66,7 @@ class NodeGrpcGenerator : public grpc::protobuf::compiler::CodeGenerator {
     }
 
     // Get output file name
-    std::string file_name = GetJSServiceFilename(file->name());
+    std::string file_name = GetJSServiceFilename(std::string(file->name()));
 
     std::unique_ptr<grpc::protobuf::io::ZeroCopyOutputStream> output(
         context->Open(file_name));
